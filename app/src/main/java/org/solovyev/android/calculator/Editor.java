@@ -98,6 +98,49 @@ public class Editor {
         }
     }
 
+    private class SplitText {
+        public int selectionStart = 0;
+        public int selectionEnd = 0;
+        public int selectionLength = 0;
+        public int insertionPos = 0;
+        public boolean textSelected = false;
+        public String textLeft = "";
+        public String textMid = "";
+        public String textRight = "";
+        public String text = "";
+
+        public SplitText(String text, int cursorPos) {
+            this.text = text;
+            selectionStart = view.getSelectionStart();
+            selectionEnd = view.getSelectionEnd();
+            selectionLength = selectionEnd - selectionStart;
+            textSelected = selectionLength != 0;
+            insertionPos = textSelected ?
+                      clamp(selectionStart, text)
+                    : clamp(cursorPos, text);
+            textLeft = text.substring(0, insertionPos);
+            textMid = text.substring(selectionStart, selectionEnd);
+            textRight = text.substring(insertionPos + selectionLength, text.length());
+        }
+
+        public String getTextMid(boolean deleteSelection) {
+            return deleteSelection ? "" : this.textMid;
+        }
+
+        public String getDelTextLeft() {
+            MathType type = MathType.getType(text, insertionPos - 1, false, engine).type;
+            return this.textSelected ?
+                   this.textLeft
+                 : type == MathType.grouping_separator ?
+                   this.textLeft.substring(0,this.textLeft.length()-2)
+                 : this.textLeft.substring(0,this.textLeft.length()-1);
+        }
+        public int getDelPos() {
+            return this.getDelTextLeft().length();
+        }
+    }
+
+
     @VisibleForTesting
     @Nullable
     EditorTextProcessor textProcessor;
@@ -240,20 +283,17 @@ public class Editor {
 
     public boolean erase() {
         Check.isMainThread();
-        final int selection = state.selection;
+        final int delPos = state.selection;
         final String text = state.getTextString();
-        if (selection <= 0 || text.length() <= 0 || selection > text.length()) {
+        final SplitText st = new SplitText(text, delPos);
+
+        if (delPos <= 0 || text.length() <= 0 || delPos > text.length()) {
             return false;
         }
-        int removeStart = selection - 1;
-        if (MathType.getType(text, selection - 1, false, engine).type == MathType.grouping_separator) {
-            // we shouldn't remove just separator as it will be re-added after the evaluation is done. Remove the digit
-            // before
-            removeStart -= 1;
-        }
 
-        final String newText = text.substring(0, removeStart) + text.substring(selection, text.length());
-        onTextChanged(EditorState.create(newText, removeStart));
+        final String newText = st.getDelTextLeft() + st.getTextMid(true) + st.textRight;
+        onTextChanged(EditorState.create(newText, st.getDelPos()));
+
         return !newText.isEmpty();
     }
 
@@ -277,16 +317,36 @@ public class Editor {
         insert(text, 0);
     }
 
-    public void insert(@Nonnull String text, int selectionOffset) {
+    public void insert(@Nonnull String textToInsert, int selectionOffset) {
         Check.isMainThread();
-        if (TextUtils.isEmpty(text) && selectionOffset == 0) {
+        if (TextUtils.isEmpty(textToInsert) && selectionOffset == 0) {
             return;
         }
         final String oldText = state.getTextString();
-        final int selection = clamp(state.selection, oldText);
-        final int newTextLength = text.length() + oldText.length();
-        final int newSelection = clamp(text.length() + selection + selectionOffset, newTextLength);
-        final String newText = oldText.substring(0, selection) + text + oldText.substring(selection);
+        final MathType type = MathType.getType(textToInsert, 0, false, engine).type;
+        final SplitText st = new SplitText(oldText, state.selection);
+
+        boolean deleteSelection = false;
+        if (st.textSelected && type == MathType.digit) {
+            deleteSelection = true;
+        }
+
+        if (st.textSelected && type == MathType.binary_operation) {
+            textToInsert = "()" + textToInsert;
+            selectionOffset = -textToInsert.length() + 1;
+        }
+
+        final int insertedTextLength = textToInsert.length();
+        final int newTextLength = insertedTextLength + oldText.length();
+
+        final int pluginPos = insertedTextLength + selectionOffset;
+        final String insertLeft = textToInsert.substring(0, pluginPos);
+        final String insertRight = textToInsert.substring(pluginPos, insertedTextLength);
+        final String newText = st.textLeft + insertLeft + st.getTextMid(deleteSelection) + insertRight + st.textRight;
+        int newSelection = st.textLeft.length() + insertLeft.length() + st.textMid.length();
+        if (st.textSelected) newSelection += insertRight.length();
+        newSelection = clamp(newSelection, newText);
+
         onTextChanged(EditorState.create(newText, newSelection));
     }
 
